@@ -8,6 +8,7 @@ const pool = require("./db");
 const fs = require("fs");
 const authenticateToken = require("./middleware/auth");
 const { processFile } = require("./aiService");
+const enqueueAIJob = require("./producer");
 
 const app = express();
 app.use(cors());
@@ -94,9 +95,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// Protected routes (require authentication)
-
-// Upload file
+// Upload file WITH AI PROCESSING (ONLY ONE UPLOAD ENDPOINT)
 app.post(
   "/upload",
   authenticateToken,
@@ -104,24 +103,39 @@ app.post(
   async (req, res) => {
     const { originalname, path, mimetype, size } = req.file;
 
+    console.log("📤 Uploading file:", originalname);
+    console.log("🔍 Processing with AI...");
+
     try {
+      // Process file with AI to get tags
+      const tags = await processFile(path, mimetype);
+
+      console.log("✅ AI Tags generated:", tags);
+
+      // Save to database with tags
       await pool.query(
-        "INSERT INTO files(filename, filepath, mimetype, size, user_id) VALUES($1, $2, $3, $4, $5)",
-        [originalname, path, mimetype, size, req.user.id]
+        "INSERT INTO files(filename, filepath, mimetype, size, user_id, tags, ai_processed) VALUES($1, $2, $3, $4, $5, $6, $7)",
+        [originalname, path, mimetype, size, req.user.id, tags, true]
       );
-      res.json({ message: "File uploaded successfully!" });
+
+      console.log("💾 Saved to database with tags");
+
+      res.json({
+        message: "File uploaded and analyzed successfully!",
+        tags: tags,
+      });
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Database error" });
+      console.error("❌ Upload error:", err);
+      res.status(500).json({ error: "Upload or AI processing error" });
     }
   }
 );
 
-// Get user's files
+// Get user's files with tags
 app.get("/files", authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT * FROM files WHERE user_id = $1 ORDER BY upload_date DESC",
+      "SELECT id, filename, filepath, mimetype, size, upload_date, tags, ai_processed FROM files WHERE user_id = $1 ORDER BY upload_date DESC",
       [req.user.id]
     );
     res.json(result.rows);
@@ -179,52 +193,6 @@ app.delete("/files/:id", authenticateToken, async (req, res) => {
   }
 });
 
-app.listen(3001, () => {
-  console.log("Backend running on http://localhost:3001");
-});
-
-app.post(
-  "/upload",
-  authenticateToken,
-  upload.single("file"),
-  async (req, res) => {
-    const { originalname, path, mimetype, size } = req.file;
-
-    try {
-      // Process file with AI to get tags
-      const tags = await processFile(path, mimetype);
-
-      // Save to database with tags
-      await pool.query(
-        "INSERT INTO files(filename, filepath, mimetype, size, user_id, tags, ai_processed) VALUES($1, $2, $3, $4, $5, $6, $7)",
-        [originalname, path, mimetype, size, req.user.id, tags, true]
-      );
-
-      res.json({
-        message: "File uploaded and analyzed successfully!",
-        tags: tags,
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Upload or AI processing error" });
-    }
-  }
-);
-
-// Get user's files with tags
-app.get("/files", authenticateToken, async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT id, filename, filepath, mimetype, size, upload_date, tags, ai_processed FROM files WHERE user_id = $1 ORDER BY upload_date DESC",
-      [req.user.id]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
-  }
-});
-
 // Search files by tags
 app.get("/files/search", authenticateToken, async (req, res) => {
   try {
@@ -242,3 +210,34 @@ app.get("/files/search", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Search error" });
   }
 });
+
+app.listen(3001, () => {
+  console.log("Backend running on http://localhost:3001");
+});
+
+app.post(
+  "/upload",
+  authenticateToken,
+  upload.single("file"),
+  async (req, res) => {
+    const { originalname, path, mimetype, size } = req.file;
+    try {
+      // Save initial info to DB without tags yet
+      await pool.query(
+        "INSERT INTO files(filename, filepath, mimetype, size, user_id, ai_processed) VALUES($1, $2, $3, $4, $5, $6)",
+        [originalname, path, mimetype, size, req.user.id, false]
+      );
+
+      // Enqueue job for async AI processing
+      await enqueueAIJob(path, req.user.id);
+
+      // Respond immediately
+      res.json({
+        message: "File uploaded successfully; AI processing queued.",
+      });
+    } catch (err) {
+      console.error("❌ Upload error:", err);
+      res.status(500).json({ error: "Upload error" });
+    }
+  }
+);
