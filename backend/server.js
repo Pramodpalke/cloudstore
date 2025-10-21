@@ -9,6 +9,7 @@ const fs = require("fs");
 const authenticateToken = require("./middleware/auth");
 const { processFile } = require("./aiService");
 const enqueueAIJob = require("./producer");
+const { analyzeUnprocessedFiles } = require("./aiInsights");
 
 const app = express();
 app.use(cors());
@@ -241,3 +242,12 @@ app.post(
     }
   }
 );
+app.get("/ai/refresh", async (req, res) => {
+  try {
+    await analyzeUnprocessedFiles();
+    res.json({ message: "AI Insights refreshed successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "AI refresh failed" });
+  }
+});
