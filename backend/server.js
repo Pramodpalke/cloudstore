@@ -10,12 +10,13 @@ const authenticateToken = require("./middleware/auth");
 const { processFile } = require("./aiService");
 const enqueueAIJob = require("./producer");
 const { analyzeUnprocessedFiles } = require("./aiInsights");
-
+const { processFileForSummary } = require("./summarizer");
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const upload = multer({ dest: "uploads/" });
+const path = require("path");
 
 // Register endpoint
 app.post("/register", async (req, res) => {
@@ -249,5 +250,63 @@ app.get("/ai/refresh", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "AI refresh failed" });
+  }
+});
+
+// Add this endpoint after your /upload route
+app.post("/generate-summary/:id", authenticateToken, async (req, res) => {
+  try {
+    const fileId = req.params.id;
+
+    // Get file from PostgreSQL database
+    const result = await pool.query(
+      "SELECT * FROM files WHERE id = $1 AND user_id = $2",
+      [fileId, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    const file = result.rows[0];
+
+    console.log("Processing file:", file.filename, "Type:", file.mimetype);
+
+    // Check if file type is supported
+    const supportedTypes = ["application/pdf", "text/plain"];
+    if (
+      !supportedTypes.includes(file.mimetype) &&
+      !file.mimetype.includes("text")
+    ) {
+      console.log("Unsupported file type:", file.mimetype);
+      return res.status(400).json({
+        error:
+          "File type not supported for summarization. Only PDF and text files are supported.",
+      });
+    }
+
+    // Generate summary
+    const filePath = file.filepath; // Use filepath from database
+    console.log("File path:", filePath);
+
+    const summary = await processFileForSummary(filePath, file.mimetype);
+
+    if (!summary) {
+      console.error("Failed to generate summary");
+      return res.status(500).json({ error: "Failed to generate summary" });
+    }
+
+    console.log("Summary generated:", summary);
+
+    // Update PostgreSQL database with summary
+    await pool.query(
+      "UPDATE files SET summary = $1, ai_processed = $2 WHERE id = $3",
+      [summary, true, fileId]
+    );
+
+    res.json({ summary });
+  } catch (error) {
+    console.error("Summary generation error:", error);
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
